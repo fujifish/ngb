@@ -1,0 +1,440 @@
+#!/usr/bin/env node
+
+const https = require('https');
+const http = require('http');
+const crypto = require('crypto');
+const zlib = require('zlib');
+const fs = require('fs');
+const _url = require('url');
+const ProxyingAgent = require('proxying-agent');
+
+const pack = require('./package.json');
+
+const options = {
+  concurrent: 1,
+  total: 1,
+  iterations: 1,
+  delay: 30,
+  timeout: 10*1000,
+  progress: false,
+  checkContent: true,
+  urls: [],
+  method: 'GET',
+  content: null,
+  headers: {
+    'Accept-Encoding': 'gzip',
+    'Accept': '*/*',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.99 Safari/537.36'
+  }
+};
+
+function usage(msg) {
+  console.log('Nab, Grab and Benchmark a URL v' + pack.version);
+  console.log('Usage: ngb [OPTIONS] URL [URL...]\n');
+  console.log('  URL          A URL to perform a test against\n');
+  console.log('Options:');
+  console.log('  -m <method>                  the http method to use for the request. default is GET.');
+  console.log('  -i <number>                  the number of iteration to run all the tests. default is 1.');
+  console.log('  -d <number>                  delay in seconds between test iterations. default is 30.');
+  console.log('  -c <number>                  concurrent requests per test per iteration. default is 1.');
+  console.log('  -n <number>                  total number of requests per test per iteration. default is 1.');
+  console.log('  -t <number>                  request timeout in milliseconds to consider as an error. default is 10000');
+  console.log('  -p <url>                     proxy as http[s]://[username:password]@hostname_or_ip[:port]. default is no proxy');
+  console.log('  --content <file or string>   the request content to send to the server. may be a string to send or a js file that exports a function that will be used to return the content');
+  console.log('  --content-type <type>        the content type that is sent to the server. default is application/json');
+  console.log('  --check-content <true|false> whether to check the response body and report an error for responses that do not match the expected content. default is true.');
+  console.log('  --ntlm <domain>              NTLM domain if the proxy auth is ntlm');
+  console.log('  --report-errors <url>        report errors to the specified url using HTTP POST. reported errors are formatted as logstash JSON messages');
+  console.log('  --report-tag <url>           report errors tag value');
+  console.log('  --progress                   show requests progress');
+  if (msg) {
+    console.log('\nError: ' + msg);
+  }
+  process.exit(1);
+}
+
+function argValue(index) {
+  let option = process.argv[index-1];
+  let value = process.argv[index];
+  if (value.charAt(0) === '-') {
+    usage('option ' + option + ' requires a value');
+  }
+  return value;
+}
+
+for (let i = 2; i < process.argv.length; ++i) {
+  if (process.argv[i] === '-i') {
+    options.iterations = parseInt(argValue(++i));
+    continue;
+  }
+  if (process.argv[i] === '-d') {
+    options.delay = parseInt(argValue(++i));
+    continue;
+  }
+  if (process.argv[i] === '-c') {
+    options.concurrent = parseInt(argValue(++i));
+    continue;
+  }
+  if (process.argv[i] === '-n') {
+    options.total = parseInt(argValue(++i));
+    continue;
+  }
+  if (process.argv[i] === '-t') {
+    options.timeout = parseInt(argValue(++i));
+    continue;
+  }
+  if (process.argv[i] === '-p') {
+    options.proxy = argValue(++i);
+    continue;
+  }
+  if (process.argv[i] === '-m') {
+    options.method = argValue(++i);
+    continue;
+  }
+  if (process.argv[i] === '--content') {
+    options.content = argValue(++i);
+    try {
+      // get the content to send from the js file
+      options.content = require(options.content);
+    } catch(e) {
+      // ignore
+    }
+    continue;
+  }
+  if (process.argv[i] === '--content-type') {
+    options.headers['Content-Type'] = argValue(++i);
+    continue;
+  }
+  if (process.argv[i] === '--check-content') {
+    options.checkContent = argValue(++i).toLowerCase() === 'true';
+    continue;
+  }
+  if (process.argv[i] === '--ntlm') {
+    options.proxyNtlmDomain = argValue(++i);
+    continue;
+  }
+  if (process.argv[i] === '--progress') {
+    options.progress = true;
+    continue;
+  }
+  if (process.argv[i] === '--report-errors') {
+    options.reportErrors = argValue(++i);
+    continue;
+  }
+  if (process.argv[i] === '--report-tag') {
+    options.reportTag = argValue(++i);
+    continue;
+  }
+  if (process.argv[i].charAt(0) === '-') {
+    usage('unrecognized option ' + process.argv[i]);
+  }
+  options.urls.push(process.argv[i]);
+}
+
+if (options.urls.length === 0) {
+  usage('please specify a url');
+}
+
+let expect = {};
+let responses = [];
+let errors = 0;
+let requests = 0;
+let done = 0;
+
+function timestamp() {
+  return new Date().toISOString().replace('T', ' ').replace('Z', '');
+}
+
+function requestOptions(url) {
+  let parsed = _url.parse(url);
+  let secure = parsed.protocol === 'https:';
+  let httpEngine = (secure ? https : http);
+
+  let agent;
+  if (options.proxy) {
+    let proxyingOptions = {
+      proxy: options.proxy
+    };
+    if (options.proxyNtlmDomain) {
+      proxyingOptions.ntlm = {domain: options.proxyNtlmDomain}
+    }
+    agent = ProxyingAgent.create(proxyingOptions, url);
+  } else {
+    agent = new httpEngine.Agent();
+  }
+  agent.maxSockets = 512;
+  agent.keepAlive = true;
+
+  return {
+    url: url,
+    httpEngine: httpEngine,
+    hostname: parsed.hostname,
+    port: parsed.port,
+    path: parsed.path,
+    method: options.method,
+    headers: options.headers,
+    agent: agent
+  };
+}
+
+function reportMessage(message, info, cb) {
+  if (!options.reportErrors) {
+    cb && cb();
+    return;
+  }
+
+  let host = require('os').hostname();
+  let data = {
+    '@version': 1,
+    '@timestamp': new Date().toISOString(),
+    type: 'ngb',
+    tag: options.reportTag || host,
+    host: host,
+    message: message,
+    info: info
+  };
+
+  let reqOptions = requestOptions(options.reportErrors);
+  reqOptions.method = 'POST';
+  let req = reqOptions.httpEngine.request(reqOptions, function(res) {
+    if (res.statusCode !== 200 && res.statusCode != 201) {
+      console.log('failed to post error report, status code is ' + res.statusCode);
+    }
+    res.on('data', function() {});
+    res.on('end', function() {
+      cb && cb();
+    });
+  });
+
+  req.on('error', function(e) {
+    console.log('failed to post error report: ' + e.message);
+    cb && cb();
+  });
+
+  req.on('socket', function() {
+    req.write(JSON.stringify(data));
+    req.end();
+  });
+}
+
+function requestDone(err, reqOptions, response) {
+  ++done;
+  if (options.progress) {
+    console.log('request ' + response.id + ' ' + (err || 'done') + (response.duration ? ' ('+response.duration+'ms)' : ''));
+  }
+  if (options.total === done) {
+    let url = response.url;
+    let avgDuration = 0;
+    for (let i = 0; i < responses.length; ++i) {
+      avgDuration += response.duration;
+      if (responses[i].error) {
+        delete responses[i].body;
+        reportMessage('Response ' + i + ' Error', responses[i]);
+        console.log('Response ' + i + ' Error: ' + JSON.stringify(responses[i], true, 2));
+        console.log('--------------');
+      }
+    }
+    avgDuration = avgDuration / responses.length;
+    reportMessage('[NGB] finished test on ' + url + ' with ' + errors + ' errors', {
+      testUrl: url,
+      avgDuration: avgDuration,
+      totalRequests: responses.length,
+      totalErrors: errors,
+      baseline: expect,
+      iteration: currentIteration
+    });
+    console.log('Test URL: ' + url);
+    console.log('Average Duration: ' + avgDuration + 'ms');
+    console.log('Total Requests: ' + responses.length);
+    console.log('Total Errors: ' + errors);
+    console.log('Request Baseline: ' + JSON.stringify(expect, true, 2));
+    console.log('Test Options: ' + JSON.stringify(options, true, 2));
+    console.log('---- [' + timestamp() + '] Ended Test on ' + url + ' [iteration ' + currentIteration + '] ----');
+    runNextTest();
+  } else {
+    runNextRequest(reqOptions, requestDone);
+  }
+}
+
+function runNextRequest(reqOptions, cb) {
+  if (requests === options.total) {
+    return;
+  }
+
+  let startTime = Date.now();
+  let response = {
+    id: requests,
+    url: reqOptions.url,
+    startTime: new Date().toISOString()
+  };
+  responses.push(response);
+
+  ++requests;
+
+  let downloaded = new Buffer([]);
+
+  let timeout = setTimeout(function() {
+    errors++;
+    response.error = 'timeout';
+    response.length = downloaded.length;
+    response.endTime = new Date().toISOString();
+    cb && cb('timed out', reqOptions, response);
+    cb = null;
+    timeout = null;
+  }, options.timeout);
+
+  let req = reqOptions.httpEngine.request(reqOptions, function(res) {
+    if (!expect.headers) {
+      expect.headers = res.headers;
+    }
+
+    response.statusCode = res.statusCode;
+    response.headers = res.headers;
+
+    if (res.statusCode !== 200) {
+      errors++;
+      response.error = 'status';
+      response.endTime = new Date().toISOString();
+      response.duration = Date.now() - startTime;
+      cb && cb('status code ' + res.statusCode, reqOptions, response);
+      cb = null;
+      return;
+    }
+
+    let shasum = crypto.createHash('sha1');
+    res.on('data', function(data) {
+      if (typeof data === 'string') {
+        data = new Buffer(data);
+      }
+      downloaded = Buffer.concat([downloaded, data]);
+    });
+
+    res.on('end', function() {
+      // if the request timed out, ignore the end event
+      if (!timeout) {
+        return;
+      }
+
+      clearTimeout(timeout);
+
+      response.endTime = new Date().toISOString();
+      response.duration = Date.now() - startTime;
+
+      let decoders = {
+        'gzip': zlib.gunzip,
+        'deflate': zlib.deflate,
+        'none': function(data, cb) {
+          cb(null, data);
+        }
+      };
+
+      let decoder = res.headers['content-encoding'] || 'none';
+      decoders[decoder](downloaded, function(err, document) {
+        if (err) {
+          response.error = "decoder error: " + err;
+          cb && cb('decoder error', reqOptions, response);
+          cb = null;
+          return;
+        }
+
+        if (!expect.length) {
+          expect.length = document.length;
+        }
+
+        shasum.update(document);
+        response.hash = shasum.digest('hex');
+        if (!expect.hash) {
+          expect.hash = response.hash;
+        }
+
+        response.length = document.length;
+        if (options.checkContent) {
+          if (response.length !== expect.length) {
+            errors++;
+            response.error = 'length';
+            //response.body = document;
+          } else if (response.hash !== expect.hash) {
+            errors++;
+            response.error = 'hash';
+            //response.body = document;
+          }
+        }
+        cb && cb(null, reqOptions, response);
+        cb = null;
+      });
+
+    });
+
+  });
+
+  req.on('error', function(e) {
+    response.endTime = new Date().toISOString();
+    response.error = "request error: " + e.message;
+    cb && cb('error: ' + e.message, reqOptions, response);
+    cb = null;
+  });
+
+  req.on('socket', function() {
+    if (options.content) {
+      let content = typeof options.content === 'function' ? options.content(currentTest, currentIteration) : options.content;
+      req.write(content);
+    }
+    req.end();
+  });
+}
+
+let currentTest = 0;
+function runNextTest() {
+
+  if (currentTest === options.urls.length) {
+    reportMessage('[NGB] finished iteration ' + currentIteration);
+    if (willRunNextIteration()) {
+      console.log('---- Delaying next iteration for ' + options.delay + ' seconds ----');
+      setTimeout(function() {
+        runNextIteration();
+      }, options.delay * 1000);
+    } else {
+      process.exit(0);
+    }
+    return;
+  }
+
+  expect = {};
+  responses = [];
+  errors = 0;
+  requests = 0;
+  done = 0;
+
+  let url = options.urls[currentTest++];
+  reportMessage('[NGB] starting test on ' + url, {
+    testUrl: url,
+    totalRequests: options.total,
+    iteration: currentIteration
+  });
+  console.log('---- [' + timestamp() + '] Starting Test on ' + url + ' [iteration ' + currentIteration + '] ----');
+  for (let j = 0; j < options.concurrent; ++j) {
+    runNextRequest(requestOptions(url), requestDone);
+  }
+}
+
+let currentIteration = 0;
+
+function willRunNextIteration() {
+  return currentIteration < options.iterations;
+}
+
+function runNextIteration() {
+  if (currentIteration === options.iterations) {
+    reportMessage('[NGB] finished', options, function() {
+      process.exit(0);
+    });
+  }
+
+  ++currentIteration;
+  currentTest = 0;
+  reportMessage('[NGB] starting iteration ' + currentIteration);
+  runNextTest();
+}
+
+reportMessage('[NGB] starting', options);
+runNextIteration();
