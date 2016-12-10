@@ -1,19 +1,19 @@
 {
   "name": "ngb",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Nab, Grab and Benchmark a URL",
   "author": "Capriza Inc. <backend@capriza.com>",
   "maintainers": [
     "Nadav Fischer <nadav.fischer@capriza.com>",
     "Yuval Carmel <yuval.carmel@capriza.com>"
   ],
-  "homepage": "http://github.com/capriza/cab",
+  "homepage": "http://github.com/capriza/ngb",
   "repository": {
     "type": "git",
-    "url": "http://github.com/capriza/cab.git"
+    "url": "http://github.com/capriza/ngb.git"
   },
   "bugs": {
-    "url": "https://github.com/capriza/cab/issues"
+    "url": "https://github.com/capriza/ngb/issues"
   },
   "keywords": [
     "test",
@@ -27,9 +27,9 @@
     "proxying-agent": "2.1.0"
   },
   "devDependencies": {},
-  "main": "nab",
+  "main": "ngb",
   "bin": {
-    "nab": "./nab"
+    "nab": "./ngb"
   },
   "license": "MIT"
 }
