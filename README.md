@@ -1,3 +1,5 @@
+<div align="center"><img src="https://capriza.github.io/images/logos/logos-timer.svg" height="128" /></div>
+
 # ngb - Nab, Grab n' Benchmark a URL
 
 __ngb__ is a commandline utility for testing and benchmarking a list of URLs.
