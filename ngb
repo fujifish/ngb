@@ -87,6 +87,11 @@ for (let i = 2; i < process.argv.length; ++i) {
     options.proxy = argValue(++i);
     continue;
   }
+  if (process.argv[i] === '-h') {
+    let [name, value] = argValue(++i).split(": ", 2);
+    options.headers[name] = value;
+    continue;
+  }
   if (process.argv[i] === '-m') {
     options.method = argValue(++i);
     continue;
