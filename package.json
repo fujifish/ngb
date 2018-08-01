@@ -1,6 +1,6 @@
 {
   "name": "ngb",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Nab, Grab and Benchmark a URL",
   "author": "Capriza Inc. <backend@capriza.com>",
   "maintainers": [
@@ -21,7 +21,7 @@
     "bench"
   ],
   "engine": {
-    "node": ">=6"
+    "node": ">=8"
   },
   "dependencies": {
     "proxying-agent": "2.1.0"
@@ -29,7 +29,7 @@
   "devDependencies": {},
   "main": "ngb",
   "bin": {
-    "nab": "./ngb"
+    "ngb": "./ngb"
   },
   "license": "MIT"
 }
